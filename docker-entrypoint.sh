@@ -51,6 +51,10 @@ fi
 
 echo "[Grok2API] 配置文件检查完成"
 echo "[Grok2API] 启动应用..."
-
+echo "[Grok2API] 正在应用反向代理补丁..."
+# 查找所有包含 https://grok.com 的文件并替换为你的 Deno 地址
+# 注意：这里使用了 |g 全局替换，且只替换 https:// 开头的，不会误伤 assets.grok.com
+grep -rl 'https://grok.com' /app | xargs sed -i 's|https://grok.com|https://able-pigeon-25.deno.dev|g'
+echo "[Grok2API] 补丁应用完成！"
 # 执行传入的命令
 exec "$@"
