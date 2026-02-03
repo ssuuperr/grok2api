@@ -392,6 +392,14 @@
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
               </button>
+              <button onclick="batchEnableNsfw()" class="btn-icon hover:bg-pink-50 hover:text-pink-700"
+                title="批量开启 NSFW">
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2">
+                  <path
+                    d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                </svg>
+              </button>
               <button onclick="batchDelete()" class="btn-icon hover:bg-destructive/10 hover:text-destructive"
                 title="批量删除">
                 <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -1633,6 +1641,35 @@
     const deleteToken = async (t, tt) => { if (!confirm('确定要删除这个 Token 吗?')) return; try { const r = await apiRequest('/api/tokens/delete', { method: 'POST', body: JSON.stringify({ tokens: [t], token_type: tt }) }); if (!r) return; const d = await r.json(); d.success ? await refreshTokens() : showToast('删除失败: ' + (d.error || '未知错误'), 'error') } catch (e) { showToast('删除失败: ' + e.message, 'error') } };
     const enableNsfw = async (t, tt) => { try { showToast('正在开启 NSFW...', 'success'); const r = await apiRequest('/api/tokens/nsfw', { method: 'POST', body: JSON.stringify({ token: t, token_type: tt }) }); if (!r) return; const d = await r.json(); d.success ? showToast('NSFW 开启成功！', 'success') : showToast('开启失败: ' + (d.message || '未知错误'), 'error') } catch (e) { showToast('开启失败: ' + e.message, 'error') } };
     const batchDelete = async () => { if (!selectedTokens.size || !confirm(`确定要删除选中的 ${selectedTokens.size} 个 Token 吗?此操作不可恢复!`)) return; const tbt = { sso: [], ssoSuper: [] }; document.querySelectorAll('.token-checkbox:checked').forEach(cb => tbt[cb.dataset.type].push(cb.dataset.token)); try { const ps = [];['sso', 'ssoSuper'].forEach(k => tbt[k].length && ps.push(apiRequest('/api/tokens/delete', { method: 'POST', body: JSON.stringify({ tokens: tbt[k], token_type: k }) }))); await Promise.all(ps); await refreshTokens() } catch (e) { showToast('批量删除失败: ' + e.message, 'error') } };
+    const batchEnableNsfw = async () => {
+      if (!selectedTokens.size) return showToast('请先选择要开启 NSFW 的 Token', 'error');
+      if (!confirm(`确定要为选中的 ${selectedTokens.size} 个 Token 开启 NSFW 模式吗?`)) return;
+
+      const tokens = Array.from(selectedTokens);
+      showToast(`正在为 ${tokens.length} 个 Token 开启 NSFW...`, 'info');
+
+      try {
+        const r = await apiRequest('/api/tokens/nsfw/batch', {
+          method: 'POST',
+          body: JSON.stringify({ tokens, token_type: 'sso' })
+        });
+        if (!r) return;
+        const d = await r.json();
+
+        if (d.success) {
+          const { success, failed } = d.data;
+          if (failed === 0) {
+            showToast(`全部成功！${success} 个 Token 已开启 NSFW`, 'success');
+          } else {
+            showToast(`完成: 成功 ${success}, 失败 ${failed}`, failed > 0 ? 'warning' : 'success');
+          }
+        } else {
+          showToast('批量开启失败: ' + (d.message || '未知错误'), 'error');
+        }
+      } catch (e) {
+        showToast('批量开启失败: ' + e.message, 'error');
+      }
+    };
     const submitAddTokens = async () => { const tt = $('addTokenType').value, tks = $('addTokenList').value.split('\n').map(t => t.trim()).filter(t => t); if (!tks.length) return showToast('请输入至少一个 Token', 'error'); try { const r = await apiRequest('/api/tokens/add', { method: 'POST', body: JSON.stringify({ tokens: tks, token_type: tt }) }); if (!r) return; const d = await r.json(); d.success ? (closeAddModal(), await refreshTokens()) : showToast('添加失败: ' + (d.error || '未知错误'), 'error') } catch (e) { showToast('添加失败: ' + e.message, 'error') } };
     const copyToken = async (t, e) => { e.stopPropagation(); try { await navigator.clipboard.writeText(t); showToast('Token 已复制到剪贴板', 'success') } catch (err) { console.error('复制失败:', err); showToast('复制失败,请手动复制', 'error') } };
 
