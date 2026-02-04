@@ -66,8 +66,15 @@ class GrokImagineWsClient:
         self._url_pattern = re.compile(r"/images/([a-f0-9-]+)\.(png|jpg)")
 
     def _get_ws_headers(self, sso: str) -> Dict[str, str]:
+        cookie_parts = [f"sso={sso}", f"sso-rw={sso}"]
+        cf_clearance = setting.grok_config.get("cf_clearance", "")
+        if cf_clearance:
+            if not cf_clearance.startswith("cf_clearance="):
+                cf_clearance = f"cf_clearance={cf_clearance}"
+            cookie_parts.append(cf_clearance)
+
         return {
-            "Cookie": f"sso={sso}; sso-rw={sso}",
+            "Cookie": "; ".join(cookie_parts),
             "Origin": "https://grok.com",
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
