@@ -1,6 +1,8 @@
 """Grok API 客户端 - 处理OpenAI到Grok的请求转换和响应处理"""
 
 import asyncio
+import time
+import uuid
 import orjson
 from typing import Dict, List, Tuple, Any, Optional
 from curl_cffi.requests import AsyncSession as curl_AsyncSession
@@ -8,11 +10,17 @@ from curl_cffi.requests import AsyncSession as curl_AsyncSession
 from app.core.config import setting
 from app.core.logger import logger
 from app.models.grok_models import Models
+from app.models.openai_schema import (
+    OpenAIChatCompletionChunkResponse,
+    OpenAIChatCompletionChunkChoice,
+    OpenAIChatCompletionChunkMessage,
+)
 from app.services.grok.processer import GrokResponseProcessor
 from app.services.grok.statsig import get_dynamic_headers
 from app.services.grok.token import token_manager
 from app.services.grok.upload import ImageUploadManager
 from app.services.grok.create import PostCreateManager
+from app.services.grok.imagine_ws import imagine_ws_client
 from app.core.exception import GrokApiException
 
 
@@ -44,6 +52,9 @@ class GrokClient:
         """转换OpenAI请求为Grok请求"""
         model = request["model"]
         info = Models.get_model_info(model)
+        if info.get("channel") == "imagine_ws":
+            return await GrokClient._openai_to_imagine_ws(request, info)
+
         prompt_style = info.get("prompt_style", "chat")
         if prompt_style == "imagine":
             content, images = GrokClient._extract_imagine_prompt(request["messages"])
@@ -61,6 +72,102 @@ class GrokClient:
             images = images[:1]
         
         return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream, image_count)
+
+    @staticmethod
+    async def _openai_to_imagine_ws(request: dict, info: Dict[str, Any]):
+        model = request["model"]
+        prompt, _ = GrokClient._extract_imagine_prompt(request["messages"])
+        if not prompt:
+            raise GrokApiException("缺少生成提示词", "INVALID_PROMPT")
+
+        stream = request.get("stream", False)
+        n = info.get("image_generation_count", setting.grok_config.get("imagine_default_image_count", 4))
+        aspect_ratio = setting.grok_config.get("imagine_default_aspect_ratio", "2:3")
+
+        if stream:
+            return GrokClient._stream_imagine_ws(prompt, n, aspect_ratio, model)
+
+        result = await imagine_ws_client.generate(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            n=n,
+            enable_nsfw=True,
+        )
+
+        if not result.get("success"):
+            error_msg = result.get("error", "Image generation failed")
+            raise GrokApiException(error_msg, "IMAGINE_WS_ERROR")
+
+        urls = result.get("urls", [])
+        content = "已为您生成图片：\n\n" + "\n".join([f"![图片]({url})" for url in urls])
+        return GrokResponseProcessor._build_response(content, model)
+
+    @staticmethod
+    def _stream_imagine_ws(prompt: str, n: int, aspect_ratio: str, model: str):
+        stage_progress = {"preview": 33, "medium": 66, "final": 99}
+        stage_names = {"preview": "预览", "medium": "中等", "final": "高清"}
+        show_thinking = setting.grok_config.get("show_thinking", True)
+
+        image_stages: Dict[str, str] = {}
+        thinking_started = False
+
+        def make_chunk(content: str, finish: str = None):
+            chunk_data = OpenAIChatCompletionChunkResponse(
+                id=f"chatcmpl-{uuid.uuid4()}",
+                created=int(time.time()),
+                model=model,
+                choices=[OpenAIChatCompletionChunkChoice(
+                    index=0,
+                    delta=OpenAIChatCompletionChunkMessage(
+                        role="assistant",
+                        content=content
+                    ) if content else {},
+                    finish_reason=finish
+                )]
+            )
+            return f"data: {chunk_data.model_dump_json()}\n\n"
+
+        async def stream():
+            nonlocal thinking_started
+            async for item in imagine_ws_client.generate_stream(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                n=n,
+                enable_nsfw=True,
+            ):
+                if item.get("type") == "progress":
+                    if not show_thinking:
+                        continue
+                    image_id = item["image_id"]
+                    stage = item["stage"]
+                    if image_stages.get(image_id) == stage:
+                        continue
+                    image_stages[image_id] = stage
+                    progress = stage_progress.get(stage, 0)
+                    text = f"图片 {len(image_stages)}/{item['total']} - {stage_names.get(stage, stage)} ({progress}%)"
+                    if not thinking_started:
+                        thinking_started = True
+                        yield make_chunk(f"<think>{text}\n")
+                    else:
+                        yield make_chunk(f"{text}\n")
+
+                elif item.get("type") == "result":
+                    if thinking_started and show_thinking:
+                        yield make_chunk("</think>\n")
+
+                    if item.get("success"):
+                        urls = item.get("urls", [])
+                        content = "已为您生成图片：\n\n"
+                        content += "\n".join([f"![图片]({url})" for url in urls])
+                        yield make_chunk(content)
+                    else:
+                        yield make_chunk(f"生成失败: {item.get('error', 'Unknown error')}")
+
+                    yield make_chunk("", "stop")
+                    yield "data: [DONE]\n\n"
+                    break
+
+        return stream()
 
     @staticmethod
     async def _retry(
@@ -318,6 +425,8 @@ class GrokClient:
                     ref_id = post_id or (file_attachments[0] if file_attachments else "")
                     if ref_id:
                         headers["Referer"] = f"https://grok.com/imagine/{ref_id}"
+                elif model == "grok-2-image":
+                    headers["Referer"] = "https://grok.com/imagine"
 
                 # 创建会话并执行请求
                 session = curl_AsyncSession(impersonate=BROWSER)

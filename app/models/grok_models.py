@@ -112,19 +112,20 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "is_video_model": True
     },
     "grok-2-image": {
-        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
-        "rate_limit_model": "grok-3",
+        "grok_model": ("grok-2-image", "MODEL_MODE_FAST"),
+        "rate_limit_model": "grok-2-image",
         "cost": {"type": "low_cost", "multiplier": 1, "description": "计1次调用"},
         "requires_super": False,
         "display_name": "Grok 2 Image",
-        "description": "HTTP-based image generation channel adapted from imagine2api.",
+        "description": "WebSocket-based image generation channel adapted from imagine2api.",
         "raw_model_path": "xai/grok-2-image",
         "default_temperature": 1.0,
         "default_max_output_tokens": 4096,
         "supported_max_output_tokens": 8192,
         "default_top_p": 0.95,
         "image_generation_count": 4,
-        "prompt_style": "imagine"
+        "prompt_style": "imagine",
+        "channel": "imagine_ws"
     }
 }
 

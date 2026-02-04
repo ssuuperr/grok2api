@@ -40,6 +40,10 @@ show_thinking = true
 proxy_pool_url = ""
 proxy_pool_interval = 300
 retry_status_codes = [401, 429]
+imagine_ws_url = "wss://grok.com/ws/imagine/listen"
+imagine_default_image_count = 4
+imagine_generation_timeout = 120
+imagine_default_aspect_ratio = "2:3"
 EOF
 fi
 
@@ -51,11 +55,13 @@ fi
 
 echo "[Grok2API] 配置文件检查完成"
 echo "[Grok2API] 启动应用..."
-echo "[Grok2API] 正在应用反向代理补丁..."
-# 查找所有包含 https://grok.com 的文件并替换为你的 Deno 地址
-# 注意：这里使用了 |g 全局替换，且只替换 https:// 开头的，不会误伤 assets.grok.com
-grep -rl 'https://grok.com' /app | xargs sed -i 's|https://grok.com|https://able-pigeon-25.deno.dev|g'
-grep -rl 'https://assets.grok.com' /app/app/services/grok | xargs sed -i 's|https://assets.grok.com|https://able-pigeon-25.deno.dev|g'
-echo "[Grok2API] 补丁应用完成！"
+if [ -n "$GROK_PROXY_BASE_URL" ]; then
+    echo "[Grok2API] 正在应用反向代理补丁..."
+    ws_proxy_url=$(echo "$GROK_PROXY_BASE_URL" | sed -e 's/^https:/wss:/' -e 's/^http:/ws:/')
+    grep -rl 'https://grok.com' /app | xargs sed -i "s|https://grok.com|$GROK_PROXY_BASE_URL|g"
+    grep -rl 'https://assets.grok.com' /app/app/services/grok | xargs sed -i "s|https://assets.grok.com|$GROK_PROXY_BASE_URL|g"
+    grep -rl 'wss://grok.com' /app | xargs sed -i "s|wss://grok.com|$ws_proxy_url|g"
+    echo "[Grok2API] 补丁应用完成！"
+fi
 # 执行传入的命令
 exec "$@"

@@ -190,6 +190,7 @@ class GrokTokenManager:
                 "createdTime": int(time.time() * 1000),
                 "remainingQueries": -1,
                 "heavyremainingQueries": -1,
+                "age_verified": 0,
                 "status": "active",
                 "failedCount": 0,
                 "lastFailureTime": None,
@@ -234,6 +235,21 @@ class GrokTokenManager:
         self.token_data[token_type.value][token]["note"] = note.strip()
         self._mark_dirty()  # 批量保存
         logger.info(f"[Token] 更新备注: {token[:10]}...")
+
+    async def get_age_verified(self, sso: str) -> int:
+        """获取年龄验证状态"""
+        _, data = self._find_token(sso)
+        if not data:
+            return 0
+        return int(data.get("age_verified", 0))
+
+    async def set_age_verified(self, sso: str, verified: int = 1) -> None:
+        """设置年龄验证状态"""
+        token_type, data = self._find_token(sso)
+        if not data:
+            return
+        self.token_data[token_type][sso]["age_verified"] = verified
+        self._mark_dirty()
     
     def get_tokens(self) -> Dict[str, Any]:
         """获取所有Token"""

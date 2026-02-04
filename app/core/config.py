@@ -24,6 +24,10 @@ DEFAULT_GROK = {
     "stream_chunk_timeout": 120,
     "stream_total_timeout": 600,
     "retry_status_codes": [401, 429],  # 可重试的HTTP状态码
+    "imagine_ws_url": "wss://grok.com/ws/imagine/listen",
+    "imagine_default_image_count": 4,
+    "imagine_generation_timeout": 120,
+    "imagine_default_aspect_ratio": "2:3",
 }
 
 DEFAULT_GLOBAL = {
