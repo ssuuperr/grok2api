@@ -110,6 +110,21 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "supported_max_output_tokens": 131072,
         "default_top_p": 0.95,
         "is_video_model": True
+    },
+    "grok-2-image": {
+        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
+        "rate_limit_model": "grok-3",
+        "cost": {"type": "low_cost", "multiplier": 1, "description": "计1次调用"},
+        "requires_super": False,
+        "display_name": "Grok 2 Image",
+        "description": "HTTP-based image generation channel adapted from imagine2api.",
+        "raw_model_path": "xai/grok-2-image",
+        "default_temperature": 1.0,
+        "default_max_output_tokens": 4096,
+        "supported_max_output_tokens": 8192,
+        "default_top_p": 0.95,
+        "image_generation_count": 4,
+        "prompt_style": "imagine"
     }
 }
 
@@ -130,6 +145,7 @@ class Models(Enum):
     GROK_4_EXPERT = "grok-4-expert"
     GROK_4_HEAVY = "grok-4-heavy"
     GROK_IMAGINE_0_9 = "grok-imagine-0.9"
+    GROK_2_IMAGE = "grok-2-image"
 
     @classmethod
     def get_model_info(cls, model: str) -> Dict[str, Any]:

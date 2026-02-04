@@ -43,23 +43,36 @@ class GrokClient:
     async def openai_to_grok(request: dict):
         """转换OpenAI请求为Grok请求"""
         model = request["model"]
-        content, images = GrokClient._extract_content(request["messages"])
+        info = Models.get_model_info(model)
+        prompt_style = info.get("prompt_style", "chat")
+        if prompt_style == "imagine":
+            content, images = GrokClient._extract_imagine_prompt(request["messages"])
+        else:
+            content, images = GrokClient._extract_content(request["messages"])
         stream = request.get("stream", False)
         
-        # 获取模型信息
-        info = Models.get_model_info(model)
         grok_model, mode = Models.to_grok(model)
         is_video = info.get("is_video_model", False)
+        image_count = info.get("image_generation_count", 2)
         
         # 视频模型限制
         if is_video and len(images) > 1:
             logger.warning(f"[Client] 视频模型仅支持1张图片，已截取前1张")
             images = images[:1]
         
-        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream)
+        return await GrokClient._retry(model, content, images, grok_model, mode, is_video, stream, image_count)
 
     @staticmethod
-    async def _retry(model: str, content: str, images: List[str], grok_model: str, mode: str, is_video: bool, stream: bool):
+    async def _retry(
+        model: str,
+        content: str,
+        images: List[str],
+        grok_model: str,
+        mode: str,
+        is_video: bool,
+        stream: bool,
+        image_count: int
+    ):
         """重试请求"""
         last_err = None
 
@@ -73,7 +86,16 @@ class GrokClient:
                 if is_video and img_ids and img_uris:
                     post_id = await GrokClient._create_post(img_ids[0], img_uris[0], token)
 
-                payload = GrokClient._build_payload(content, grok_model, mode, img_ids, img_uris, is_video, post_id)
+                payload = GrokClient._build_payload(
+                    content,
+                    grok_model,
+                    mode,
+                    img_ids,
+                    img_uris,
+                    is_video,
+                    post_id,
+                    image_count
+                )
                 return await GrokClient._request(payload, token, model, stream, post_id)
 
             except GrokApiException as e:
@@ -133,6 +155,50 @@ class GrokClient:
         return "\n".join(formatted_messages), images
 
     @staticmethod
+    def _extract_imagine_prompt(messages: List[Dict]) -> Tuple[str, List[str]]:
+        """提取图片生成提示词（仅取最后一条 user 内容）"""
+        images: List[str] = []
+
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+
+            content = msg.get("content", "")
+            text_parts = []
+
+            if isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif item.get("type") == "image_url":
+                        if url := item.get("image_url", {}).get("url"):
+                            images.append(url)
+            else:
+                text_parts.append(content)
+
+            prompt = "".join(text_parts).strip()
+            if prompt or images:
+                return prompt, images
+
+        if messages:
+            content = messages[-1].get("content", "")
+            text_parts = []
+
+            if isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif item.get("type") == "image_url":
+                        if url := item.get("image_url", {}).get("url"):
+                            images.append(url)
+            else:
+                text_parts.append(content)
+
+            return "".join(text_parts).strip(), images
+
+        return "", images
+
+    @staticmethod
     async def _upload(urls: List[str], token: str) -> Tuple[List[str], List[str]]:
         """并发上传图片"""
         if not urls:
@@ -168,7 +234,16 @@ class GrokClient:
         return None
 
     @staticmethod
-    def _build_payload(content: str, model: str, mode: str, img_ids: List[str], img_uris: List[str], is_video: bool = False, post_id: str = None) -> Dict:
+    def _build_payload(
+        content: str,
+        model: str,
+        mode: str,
+        img_ids: List[str],
+        img_uris: List[str],
+        is_video: bool = False,
+        post_id: str = None,
+        image_count: int = 2
+    ) -> Dict:
         """构建请求载荷"""
         # 视频模型特殊处理
         if is_video and img_uris:
@@ -193,7 +268,7 @@ class GrokClient:
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
             "enableImageStreaming": True,
-            "imageGenerationCount": 2,
+            "imageGenerationCount": image_count,
             "forceConcise": False,
             "toolOverrides": {},
             "enableSideBySide": True,
