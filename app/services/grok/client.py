@@ -27,7 +27,7 @@ from app.core.exception import GrokApiException
 # 常量
 API_ENDPOINT = "https://grok.com/rest/app-chat/conversations/new"
 TIMEOUT = 120
-BROWSER = "chrome133a"
+BROWSER = "chrome136"
 MAX_RETRY = 3
 MAX_UPLOADS = 20  # 提高并发上传限制以支持更高并发
 
@@ -52,8 +52,15 @@ class GrokClient:
         """转换OpenAI请求为Grok请求"""
         model = request["model"]
         info = Models.get_model_info(model)
-        if info.get("channel") == "imagine_ws":
+        channel = info.get("channel", "")
+
+        # grok-2-image：纯 WebSocket 文生图
+        if channel == "imagine_ws":
             return await GrokClient._openai_to_imagine_ws(request, info)
+
+        # grok-imagine-1.0：根据是否有图片自动分发
+        if channel == "imagine_1.0":
+            return await GrokClient._openai_to_imagine_1_0(request, info)
 
         prompt_style = info.get("prompt_style", "chat")
         if prompt_style == "imagine":
@@ -75,6 +82,7 @@ class GrokClient:
 
     @staticmethod
     async def _openai_to_imagine_ws(request: dict, info: Dict[str, Any]):
+        """WebSocket 文生图通道（grok-2-image）"""
         model = request["model"]
         prompt, _ = GrokClient._extract_imagine_prompt(request["messages"])
         if not prompt:
@@ -101,6 +109,92 @@ class GrokClient:
         urls = result.get("urls", [])
         content = "已为您生成图片：\n\n" + "\n".join([f"![图片]({url})" for url in urls])
         return GrokResponseProcessor._build_response(content, model)
+
+    @staticmethod
+    async def _openai_to_imagine_1_0(request: dict, info: Dict[str, Any]):
+        """grok-imagine-1.0 智能分发：无图片走 WS 文生图，有图片走 REST 图编辑"""
+        model = request["model"]
+        prompt, images = GrokClient._extract_imagine_prompt(request["messages"])
+
+        if images:
+            # 有参考图 → REST API 图编辑模式
+            return await GrokClient._openai_to_image_edit(request, info, prompt, images)
+
+        # 无参考图 → WebSocket 文生图（复用 imagine_ws 通道）
+        if not prompt:
+            raise GrokApiException("缺少生成提示词", "INVALID_PROMPT")
+
+        stream = request.get("stream", False)
+        n = info.get("image_generation_count", setting.grok_config.get("imagine_default_image_count", 4))
+        aspect_ratio = setting.grok_config.get("imagine_default_aspect_ratio", "2:3")
+
+        if stream:
+            return GrokClient._stream_imagine_ws(prompt, n, aspect_ratio, model)
+
+        result = await imagine_ws_client.generate(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            n=n,
+            enable_nsfw=True,
+        )
+
+        if not result.get("success"):
+            error_msg = result.get("error", "Image generation failed")
+            raise GrokApiException(error_msg, "IMAGINE_WS_ERROR")
+
+        urls = result.get("urls", [])
+        content = "已为您生成图片：\n\n" + "\n".join([f"![图片]({url})" for url in urls])
+        return GrokResponseProcessor._build_response(content, model)
+
+    @staticmethod
+    async def _openai_to_image_edit(request: dict, info: Dict[str, Any], prompt: str, images: List[str]):
+        """REST API 图编辑模式：上传参考图 → 构建 imageEditModel 载荷 → 发送请求"""
+        model = request["model"]
+        stream = request.get("stream", False)
+        image_edit_model = info.get("image_edit_model", "imagine-image-edit")
+
+        if not prompt:
+            prompt = "请根据参考图生成相似风格的图片"
+
+        # 获取 Token
+        token = await token_manager.get_token(model)
+
+        # 上传参考图
+        img_ids, img_uris = await GrokClient._upload(images, token)
+        if not img_uris:
+            raise GrokApiException("参考图上传失败", "UPLOAD_ERROR")
+
+        # 构建完整的图片 URL
+        image_urls = []
+        for uri in img_uris:
+            if uri.startswith("http"):
+                image_urls.append(uri)
+            else:
+                image_urls.append(f"https://assets.grok.com/{uri.lstrip('/')}")
+
+        # 尝试获取 parentPostId（从 URL 中提取）
+        import re
+        parent_post_id = ""
+        for url in image_urls:
+            match = re.search(r"/generated/([a-f0-9-]+)/", url)
+            if match:
+                parent_post_id = match.group(1)
+                break
+            match = re.search(r"/users/[^/]+/([a-f0-9-]+)/content", url)
+            if match:
+                parent_post_id = match.group(1)
+                break
+
+        # 构建图编辑载荷
+        payload = GrokClient._build_image_edit_payload(
+            prompt=prompt,
+            image_edit_model=image_edit_model,
+            image_urls=image_urls,
+            file_ids=img_ids,
+            parent_post_id=parent_post_id,
+        )
+
+        return await GrokClient._request(payload, token, model, stream)
 
     @staticmethod
     def _stream_imagine_ws(prompt: str, n: int, aspect_ratio: str, model: str):
@@ -391,6 +485,52 @@ class GrokClient:
         }
 
     @staticmethod
+    def _build_image_edit_payload(
+        prompt: str,
+        image_edit_model: str,
+        image_urls: List[str],
+        file_ids: List[str],
+        parent_post_id: str = "",
+    ) -> Dict:
+        """构建图编辑请求载荷（REST API 通道）"""
+        model_config_override = {
+            "modelMap": {
+                "imageEditModel": image_edit_model,
+                "imageEditModelConfig": {
+                    "imageReferences": image_urls,
+                },
+            }
+        }
+        if parent_post_id:
+            model_config_override["modelMap"]["imageEditModelConfig"]["parentPostId"] = parent_post_id
+
+        return {
+            "temporary": True,
+            "modelName": "grok-3",
+            "message": prompt,
+            "fileAttachments": file_ids,
+            "imageAttachments": [],
+            "disableSearch": True,
+            "enableImageGeneration": True,
+            "returnImageBytes": False,
+            "returnRawGrokInXaiRequest": False,
+            "enableImageStreaming": True,
+            "imageGenerationCount": 2,
+            "forceConcise": False,
+            "toolOverrides": {"imageGen": True},
+            "enableSideBySide": True,
+            "sendFinalMetadata": True,
+            "isReasoning": False,
+            "webpageUrls": [],
+            "disableTextFollowUps": True,
+            "disableMemory": False,
+            "forceSideBySide": False,
+            "modelMode": "MODEL_MODE_FAST",
+            "isAsyncChat": False,
+            "modelConfigOverride": model_config_override,
+        }
+
+    @staticmethod
     async def _request(payload: dict, token: str, model: str, stream: bool, post_id: str = None):
         """发送请求"""
         if not token:
@@ -425,7 +565,7 @@ class GrokClient:
                     ref_id = post_id or (file_attachments[0] if file_attachments else "")
                     if ref_id:
                         headers["Referer"] = f"https://grok.com/imagine/{ref_id}"
-                elif model == "grok-2-image":
+                elif model in ("grok-2-image", "grok-imagine-1.0"):
                     headers["Referer"] = "https://grok.com/imagine"
 
                 # 创建会话并执行请求
