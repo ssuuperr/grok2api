@@ -1,11 +1,11 @@
 """语音 API 路由 - OpenAI TTS 兼容"""
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Dict, Any
 
+from app.core.auth import auth_manager
 from app.services.grok.voice import voice_service
-from app.services.auth import auth_manager
 from app.core.logger import logger
 
 router = APIRouter(tags=["Audio"])
@@ -20,18 +20,18 @@ class SpeechRequest(BaseModel):
 
 
 @router.post("/audio/speech")
-async def create_speech(request: Request, body: SpeechRequest):
+async def create_speech(
+    request: Request,
+    body: SpeechRequest,
+    auth_info: Dict[str, Any] = Depends(auth_manager.verify),
+):
     """获取 LiveKit Token 以建立语音连接
 
     返回 LiveKit Token 和 WebSocket 连接信息，
     客户端使用该信息建立实时语音通信。
     """
-    # 鉴权
-    auth_header = request.headers.get("Authorization", "")
-    api_key = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
-    auth_manager.verify(api_key)
-
-    logger.info(f"[Audio] 请求语音 Token: voice={body.voice}, speed={body.speed}")
+    key_name = auth_info.get("name", "Unknown")
+    logger.info(f"[Audio] 请求语音 Token: voice={body.voice}, speed={body.speed}, key={key_name}")
 
     result = await voice_service.get_token(
         voice=body.voice,
