@@ -447,9 +447,11 @@ class GrokClient:
         img_uris: List[str],
         is_video: bool = False,
         post_id: str = None,
-        image_count: int = 2
+        image_count: int = 2,
+        temperature: float = 0.8,
+        top_p: float = 0.95
     ) -> Dict:
-        """构建请求载荷"""
+        """构建请求载荷（对齐源项目 AppChatReverse.build_payload）"""
         # 视频模型特殊处理
         if is_video and img_uris:
             img_msg = f"https://grok.com/imagine/{post_id}" if post_id else f"https://assets.grok.com/post/{img_uris[0]}"
@@ -461,31 +463,48 @@ class GrokClient:
                 "toolOverrides": {"videoGen": True}
             }
         
-        # 标准载荷
+        # 构建 modelConfigOverride（温度和 topP 参数）
+        model_config_override = {
+            "temperature": temperature,
+            "topP": top_p,
+        }
+        
+        # 标准载荷 — 与源项目 AppChatReverse.build_payload 对齐
         return {
-            "temporary": setting.grok_config.get("temporary", True),
-            "modelName": model,
-            "message": content,
-            "fileAttachments": img_ids,
-            "imageAttachments": [],
+            "deviceEnvInfo": {
+                "darkModeEnabled": False,
+                "devicePixelRatio": 2,
+                "screenWidth": 2056,
+                "screenHeight": 1329,
+                "viewportWidth": 2056,
+                "viewportHeight": 1083,
+            },
+            "disableMemory": setting.grok_config.get("disable_memory", False),
             "disableSearch": False,
+            "disableSelfHarmShortCircuit": False,
+            "disableTextFollowUps": False,
             "enableImageGeneration": True,
+            "enableImageStreaming": True,
+            "enableSideBySide": True,
+            "fileAttachments": img_ids,
+            "forceConcise": False,
+            "forceSideBySide": False,
+            "imageAttachments": [],
+            "imageGenerationCount": image_count,
+            "isAsyncChat": False,
+            "isReasoning": False,
+            "message": content,
+            "modelMode": mode,
+            "modelName": model,
+            "responseMetadata": {
+                "requestModelDetails": {"modelId": model},
+                "modelConfigOverride": model_config_override,
+            },
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
-            "enableImageStreaming": True,
-            "imageGenerationCount": image_count,
-            "forceConcise": False,
-            "toolOverrides": {},
-            "enableSideBySide": True,
             "sendFinalMetadata": True,
-            "isReasoning": False,
-            "webpageUrls": [],
-            "disableTextFollowUps": True,
-            "responseMetadata": {"requestModelDetails": {"modelId": model}},
-            "disableMemory": False,
-            "forceSideBySide": False,
-            "modelMode": mode,
-            "isAsyncChat": False
+            "temporary": setting.grok_config.get("temporary", True),
+            "toolOverrides": {},
         }
 
     @staticmethod

@@ -84,31 +84,32 @@ class GrokResponseProcessor:
                 if video_resp := grok_resp.get("streamingVideoGenerationResponse"):
                     if video_url := video_resp.get("videoUrl"):
                         content = await GrokResponseProcessor._build_video_content(video_url, auth_token)
-                        result = GrokResponseProcessor._build_response(content, model or "grok-imagine-0.9")
+                        result = GrokResponseProcessor._build_response(content, model or "grok-imagine-1.0-video")
                         response_closed = True
                         response.close()
                         return result
 
-                # 模型响应
-                model_response = grok_resp.get("modelResponse")
-                if not model_response:
-                    continue
-
-                if error_msg := model_response.get("error"):
-                    raise GrokApiException(f"模型错误: {error_msg}", "MODEL_ERROR")
-
-                # 构建内容
-                content = model_response.get("message", "")
-                model_name = model_response.get("model")
-
-                # 处理图片
-                if images := model_response.get("generatedImageUrls"):
-                    content = await GrokResponseProcessor._append_images(content, images, auth_token)
-
-                result = GrokResponseProcessor._build_response(content, model_name)
-                response_closed = True
-                response.close()
-                return result
+                # 图片生成响应（通过 modelResponse 收集）
+                if mr := grok_resp.get("modelResponse"):
+                    # 递归收集所有图片 URL
+                    image_urls = GrokResponseProcessor._collect_image_urls(mr)
+                    if image_urls:
+                        content = mr.get("message", "")
+                        content = await GrokResponseProcessor._append_images(content, image_urls, auth_token)
+                        result = GrokResponseProcessor._build_response(content, model or mr.get("model"))
+                        response_closed = True
+                        response.close()
+                        return result
+                    
+                    # 普通文本响应
+                    if error_msg := mr.get("error"):
+                        raise GrokApiException(f"模型错误: {error_msg}", "MODEL_ERROR")
+                    content = mr.get("message", "")
+                    if content:
+                        result = GrokResponseProcessor._build_response(content, model or mr.get("model"))
+                        response_closed = True
+                        response.close()
+                        return result
 
             raise GrokApiException("无响应数据", "NO_RESPONSE")
 
@@ -226,19 +227,40 @@ class GrokResponseProcessor:
                         
                         continue
 
+                    # 图片生成进度（streamingImageGenerationResponse）
+                    if img_gen := grok_resp.get("streamingImageGenerationResponse"):
+                        current_thinking = grok_resp.get("isThinking", False)
+                        if show_thinking:
+                            if current_thinking and not is_thinking:
+                                yield make_chunk("<think>\n")
+                                is_thinking = True
+                            if not current_thinking and is_thinking:
+                                yield make_chunk("\n</think>\n")
+                                is_thinking = False
+                        idx = img_gen.get("imageIndex", 0) + 1
+                        progress = img_gen.get("progress", 0)
+                        if show_thinking:
+                            yield make_chunk(f"正在生成第{idx}张图片中，当前进度{progress}%\n")
+                        continue
+
                     # 图片模式
                     if grok_resp.get("imageAttachmentInfo"):
                         is_image = True
 
                     token = grok_resp.get("token", "")
 
-                    # 图片处理
+                    # 图片处理（modelResponse 中的图片）
                     if is_image:
                         if model_resp := grok_resp.get("modelResponse"):
+                            # 使用递归收集方式获取所有图片 URL
+                            all_images = GrokResponseProcessor._collect_image_urls(model_resp)
+                            if not all_images:
+                                all_images = model_resp.get("generatedImageUrls", [])
+                            
                             image_mode = setting.global_config.get("image_mode", "url")
                             content = ""
 
-                            for img in model_resp.get("generatedImageUrls", []):
+                            for img in all_images:
                                 try:
                                     if image_mode == "base64":
                                         # Base64模式 - 分块发送
@@ -277,6 +299,24 @@ class GrokResponseProcessor:
 
                     # 对话处理
                     else:
+                        # cardAttachment 处理（某些模型通过卡片返回图片）
+                        if card := grok_resp.get("cardAttachment"):
+                            json_data = card.get("jsonData")
+                            if isinstance(json_data, str) and json_data.strip():
+                                try:
+                                    import orjson as card_json
+                                    card_data = card_json.loads(json_data)
+                                except Exception:
+                                    card_data = None
+                                if isinstance(card_data, dict):
+                                    image = card_data.get("image") or {}
+                                    original = image.get("original")
+                                    title = image.get("title") or ""
+                                    if original:
+                                        title_safe = title.replace("\n", " ").strip() or "image"
+                                        yield make_chunk(f"![{title_safe}]({original})\n")
+                            continue
+
                         if isinstance(token, list):
                             continue
 
@@ -363,6 +403,39 @@ class GrokResponseProcessor:
                     logger.debug("[Processor] 会话已关闭")
                 except Exception as e:
                     logger.warning(f"[Processor] 关闭会话失败: {e}")
+
+    @staticmethod
+    def _collect_image_urls(obj) -> list:
+        """递归收集响应中的所有图片 URL（对齐源项目 _collect_images）
+        
+        支持 generatedImageUrls、imageUrls、imageURLs 三种字段名
+        """
+        urls = []
+        seen = set()
+        
+        def add(url):
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+        
+        def walk(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in {"generatedImageUrls", "imageUrls", "imageURLs"}:
+                        if isinstance(item, list):
+                            for url in item:
+                                if isinstance(url, str):
+                                    add(url)
+                        elif isinstance(item, str):
+                            add(item)
+                        continue
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+        
+        walk(obj)
+        return urls
 
     @staticmethod
     async def _build_video_content(video_url: str, auth_token: str) -> str:

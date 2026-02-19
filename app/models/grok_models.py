@@ -192,8 +192,8 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "default_top_p": 0.95
     },
     "grok-4.1-thinking": {
-        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
-        "rate_limit_model": "grok-3",
+        "grok_model": ("grok-4-1-thinking-1129", "MODEL_MODE_GROK_4_1_THINKING"),
+        "rate_limit_model": "grok-4-1-thinking-1129",
         "cost": {"type": "high_cost", "multiplier": 1, "description": "计1次调用"},
         "requires_super": False,
         "display_name": "Grok 4.1 Thinking",
