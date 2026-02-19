@@ -54,9 +54,13 @@ class GrokClient:
         info = Models.get_model_info(model)
         channel = info.get("channel", "")
 
-        # grok-2-image：纯 WebSocket 文生图
+        # grok-2-image（纯文生图）：纯 WebSocket 文生图
         if channel == "imagine_ws":
             return await GrokClient._openai_to_imagine_ws(request, info)
+
+        # grok-2-image（智能分发）：无图走 WS 文生图，有图走 REST 图编辑
+        if channel == "imagine_ws_smart":
+            return await GrokClient._openai_to_imagine_1_0(request, info)
 
         # grok-imagine-1.0：根据是否有图片自动分发
         if channel == "imagine_1.0":
@@ -560,12 +564,7 @@ class GrokClient:
                 
                 # 构建请求头（放在循环内以支持重试新Token）
                 headers = GrokClient._build_headers(token)
-                if model == "grok-imagine-0.9":
-                    file_attachments = payload.get("fileAttachments", [])
-                    ref_id = post_id or (file_attachments[0] if file_attachments else "")
-                    if ref_id:
-                        headers["Referer"] = f"https://grok.com/imagine/{ref_id}"
-                elif model in ("grok-2-image", "grok-imagine-1.0"):
+                if model in ("grok-2-image", "grok-imagine-1.0"):
                     headers["Referer"] = "https://grok.com/imagine"
 
                 # 创建会话并执行请求

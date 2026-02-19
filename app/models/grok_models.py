@@ -192,8 +192,8 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "default_top_p": 0.95
     },
     "grok-4.1-thinking": {
-        "grok_model": ("grok-4-1-thinking-1129", "MODEL_MODE_GROK_4_1_THINKING"),
-        "rate_limit_model": "grok-4-1-thinking-1129",
+        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
+        "rate_limit_model": "grok-3",
         "cost": {"type": "high_cost", "multiplier": 1, "description": "计1次调用"},
         "requires_super": False,
         "display_name": "Grok 4.1 Thinking",
@@ -218,28 +218,14 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "supported_max_output_tokens": 131072,
         "default_top_p": 0.95
     },
-    # ==================== 图像/视频模型 ====================
-    "grok-imagine-0.9": {
-        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
-        "rate_limit_model": "grok-3",
-        "cost": {"type": "low_cost", "multiplier": 1, "description": "计1次调用"},
-        "requires_super": False,
-        "display_name": "Grok Imagine 0.9",
-        "description": "Image and video generation model. Supports text-to-image and image-to-video generation.",
-        "raw_model_path": "xai/grok-imagine-0.9",
-        "default_temperature": 1.0,
-        "default_max_output_tokens": 8192,
-        "supported_max_output_tokens": 131072,
-        "default_top_p": 0.95,
-        "is_video_model": True
-    },
+    # ==================== 图像模型 ====================
     "grok-2-image": {
         "grok_model": ("grok-2-image", "MODEL_MODE_FAST"),
         "rate_limit_model": "grok-2-image",
         "cost": {"type": "low_cost", "multiplier": 1, "description": "计1次调用"},
         "requires_super": False,
         "display_name": "Grok 2 Image",
-        "description": "WebSocket-based image generation channel adapted from imagine2api.",
+        "description": "Image generation (WS) + image editing (REST). Auto-dispatches by input.",
         "raw_model_path": "xai/grok-2-image",
         "default_temperature": 1.0,
         "default_max_output_tokens": 4096,
@@ -247,7 +233,8 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "default_top_p": 0.95,
         "image_generation_count": 4,
         "prompt_style": "imagine",
-        "channel": "imagine_ws"
+        "channel": "imagine_ws_smart",
+        "image_edit_model": "imagine-image-edit"
     },
     "grok-imagine-1.0": {
         "grok_model": ("grok-3", "MODEL_MODE_FAST"),
@@ -265,6 +252,20 @@ _MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "prompt_style": "imagine",
         "channel": "imagine_1.0",
         "image_edit_model": "imagine-image-edit"
+    },
+    "grok-imagine-1.0-video": {
+        "grok_model": ("grok-3", "MODEL_MODE_FAST"),
+        "rate_limit_model": "grok-3",
+        "cost": {"type": "high_cost", "multiplier": 1, "description": "计1次调用"},
+        "requires_super": False,
+        "display_name": "Grok Imagine 1.0 Video",
+        "description": "Video generation model. Supports text-to-video and image-to-video.",
+        "raw_model_path": "xai/grok-imagine-1.0-video",
+        "default_temperature": 1.0,
+        "default_max_output_tokens": 8192,
+        "supported_max_output_tokens": 131072,
+        "default_top_p": 0.95,
+        "is_video_model": True
     },
 }
 
@@ -298,9 +299,9 @@ class Models(Enum):
     # Grok 4.20
     GROK_4_20_BETA = "grok-4.20-beta"
     # 图像/视频模型
-    GROK_IMAGINE_0_9 = "grok-imagine-0.9"
     GROK_2_IMAGE = "grok-2-image"
     GROK_IMAGINE_1_0 = "grok-imagine-1.0"
+    GROK_IMAGINE_1_0_VIDEO = "grok-imagine-1.0-video"
 
     @classmethod
     def get_model_info(cls, model: str) -> Dict[str, Any]:
