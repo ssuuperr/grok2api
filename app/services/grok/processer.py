@@ -134,7 +134,7 @@ class GrokResponseProcessor:
         think_opened = False          # 是否已发送 <think>（替代原 is_thinking + thinking_finished）
         image_think_active = False    # 图片生成进度期间的 thinking 状态
         model = None
-        filtered_tags = setting.grok_config.get("filtered_tags", "").split(",")
+        filtered_tags = [t for t in setting.grok_config.get("filtered_tags", "").split(",") if t.strip()]
         video_progress_started = False
         last_video_progress = -1
         response_closed = False
@@ -253,7 +253,18 @@ class GrokResponseProcessor:
 
                         # 收集 modelResponse 中的所有图片 URL
                         all_images = GrokResponseProcessor._collect_image_urls(mr)
+                        logger.info(f"[Processor] modelResponse 图片: {all_images}")
                         if all_images:
+                            # 规范化 URL（去掉完整域名前缀，只保留路径）
+                            normalized = []
+                            for u in all_images:
+                                if u.startswith("https://assets.grok.com/"):
+                                    u = u[len("https://assets.grok.com/"):]
+                                elif u.startswith("https://grok.com/"):
+                                    u = u[len("https://grok.com/"):]
+                                normalized.append(u)
+                            all_images = normalized
+                            logger.info(f"[Processor] 规范化后图片路径: {all_images}")
                             # 有图片 — 渲染图片
                             image_mode = setting.global_config.get("image_mode", "url")
                             for idx, img in enumerate(all_images, 1):
@@ -314,7 +325,7 @@ class GrokResponseProcessor:
                     if isinstance(token, list):
                         continue
 
-                    if any(tag in token for tag in filtered_tags if token):
+                    if filtered_tags and any(tag in token for tag in filtered_tags):
                         continue
 
                     message_tag = grok_resp.get("messageTag")
@@ -349,10 +360,12 @@ class GrokResponseProcessor:
                         if not show_thinking:
                             continue
                         if not think_opened:
+                            logger.debug("[Processor] 开始 thinking 输出")
                             content = f"<think>\n{content}"
                             think_opened = True
                     else:
                         if think_opened:
+                            logger.debug("[Processor] 结束 thinking 输出")
                             content = f"\n</think>\n{content}"
                             think_opened = False
 
