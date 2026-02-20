@@ -132,7 +132,6 @@ class GrokResponseProcessor:
         # 状态变量
         is_image = False
         is_thinking = False
-        thinking_finished = False
         model = None
         filtered_tags = setting.grok_config.get("filtered_tags", "").split(",")
         video_progress_started = False
@@ -299,6 +298,37 @@ class GrokResponseProcessor:
 
                     # 对话处理
                     else:
+                        # 对话模式下检测 modelResponse 中的图片（thinking 模型生成图片时可能不发送 imageAttachmentInfo）
+                        if model_resp := grok_resp.get("modelResponse"):
+                            all_images = GrokResponseProcessor._collect_image_urls(model_resp)
+                            if all_images:
+                                # 关闭 think 标签（如果还在 thinking 状态）
+                                if is_thinking and show_thinking:
+                                    yield make_chunk("\n</think>\n")
+                                    is_thinking = False
+                                
+                                image_mode = setting.global_config.get("image_mode", "url")
+                                for idx, img in enumerate(all_images, 1):
+                                    try:
+                                        if image_mode == "base64":
+                                            base64_str = await image_cache_service.download_base64(f"/{img}", auth_token)
+                                            if base64_str:
+                                                yield make_chunk(f"![image_{idx}]({base64_str})\n")
+                                            else:
+                                                base_url = setting.global_config.get("base_url", "")
+                                                fallback = f"{base_url}/images/{img.replace('/', '-')}" if base_url else f"https://assets.grok.com/{img}"
+                                                yield make_chunk(f"![image_{idx}]({fallback})\n")
+                                        else:
+                                            await image_cache_service.download_image(f"/{img}", auth_token)
+                                            img_path = img.replace('/', '-')
+                                            base_url = setting.global_config.get("base_url", "")
+                                            img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
+                                            yield make_chunk(f"![image_{idx}]({img_url})\n")
+                                    except Exception as e:
+                                        logger.warning(f"[Processor] 对话图片处理失败: {e}")
+                                        yield make_chunk(f"![image_{idx}](https://assets.grok.com/{img})\n")
+                                continue
+
                         # cardAttachment 处理（某些模型通过卡片返回图片）
                         if card := grok_resp.get("cardAttachment"):
                             json_data = card.get("jsonData")
@@ -325,9 +355,6 @@ class GrokResponseProcessor:
 
                         current_is_thinking = grok_resp.get("isThinking", False)
                         message_tag = grok_resp.get("messageTag")
-
-                        if thinking_finished and current_is_thinking:
-                            continue
 
                         # 搜索结果处理
                         if grok_resp.get("toolUsageCardId"):
@@ -364,7 +391,6 @@ class GrokResponseProcessor:
                             elif is_thinking and not current_is_thinking:
                                 if show_thinking:
                                     content = f"\n</think>\n{content}"
-                                thinking_finished = True
                             elif current_is_thinking:
                                 if not show_thinking:
                                     should_skip = True
@@ -439,21 +465,37 @@ class GrokResponseProcessor:
 
     @staticmethod
     async def _build_video_content(video_url: str, auth_token: str) -> str:
-        """构建视频内容"""
-        logger.debug(f"[Processor] 检测到视频: {video_url}")
-        full_url = f"https://assets.grok.com/{video_url}"
+        """构建视频内容
+        
+        优先尝试缓存下载并返回本地代理URL，
+        失败时使用 base_url 构建可通过反向代理访问的 fallback URL
+        """
+        logger.info(f"[Processor] 检测到视频URL: {video_url}")
+        base_url = setting.global_config.get("base_url", "")
         
         try:
             cache_path = await video_cache_service.download_video(f"/{video_url}", auth_token)
             if cache_path:
                 video_path = video_url.replace('/', '-')
-                base_url = setting.global_config.get("base_url", "")
                 local_url = f"{base_url}/images/{video_path}" if base_url else f"/images/{video_path}"
+                logger.info(f"[Processor] 视频缓存成功，本地URL: {local_url}")
                 return f'<video src="{local_url}" controls="controls" width="500" height="300"></video>\n'
+            else:
+                logger.warning(f"[Processor] 视频缓存下载返回空，使用 fallback")
         except Exception as e:
-            logger.warning(f"[Processor] 缓存视频失败: {e}")
+            logger.warning(f"[Processor] 缓存视频失败: {e}，使用 fallback")
         
-        return f'<video src="{full_url}" controls="controls" width="500" height="300"></video>\n'
+        # fallback：优先使用 base_url 构建可通过反向代理访问的 URL
+        if base_url:
+            # 尝试通过服务端代理返回（添加到视频缓存路径）
+            video_path = video_url.replace('/', '-')
+            fallback_url = f"{base_url}/images/{video_path}"
+            logger.info(f"[Processor] 视频 fallback（反向代理）: {fallback_url}")
+        else:
+            fallback_url = f"https://assets.grok.com/{video_url}"
+            logger.info(f"[Processor] 视频 fallback（直连）: {fallback_url}")
+        
+        return f'<video src="{fallback_url}" controls="controls" width="500" height="300"></video>\n'
 
     @staticmethod
     async def _append_images(content: str, images: list, auth_token: str) -> str:
