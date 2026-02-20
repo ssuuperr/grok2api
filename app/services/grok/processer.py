@@ -122,6 +122,8 @@ class GrokResponseProcessor:
     async def process_normal(response, auth_token: str, model: str = None) -> OpenAIChatCompletionResponse:
         """处理非流式响应"""
         response_closed = False
+        # 累积通过 cardAttachment 传递的图片 URL（grok-420 等非专用图片模型）
+        card_image_urls = []
         try:
             async for chunk in response.aiter_lines():
                 if not chunk:
@@ -148,13 +150,32 @@ class GrokResponseProcessor:
                         response.close()
                         return result
 
+                # 累积 cardAttachment 中的 AI 生成图片
+                if card := grok_resp.get("cardAttachment"):
+                    json_data = card.get("jsonData")
+                    if isinstance(json_data, str) and json_data.strip():
+                        try:
+                            card_data = orjson.loads(json_data)
+                        except Exception:
+                            card_data = None
+                        if isinstance(card_data, dict):
+                            image_chunk = card_data.get("image_chunk")
+                            if isinstance(image_chunk, dict):
+                                img_url = image_chunk.get("imageUrl", "")
+                                progress = image_chunk.get("progress", 0)
+                                if img_url and progress >= 100:
+                                    logger.info(f"[Processor] process_normal cardAttachment 图片: {img_url}")
+                                    card_image_urls.append(img_url)
+
                 # 图片生成响应（通过 modelResponse 收集）
                 if mr := grok_resp.get("modelResponse"):
                     # 递归收集所有图片 URL
                     image_urls = GrokResponseProcessor._collect_image_urls(mr)
-                    if image_urls:
+                    # 合并 cardAttachment 收集的图片
+                    all_images = image_urls + card_image_urls
+                    if all_images:
                         content = mr.get("message", "")
-                        content = await GrokResponseProcessor._append_images(content, image_urls, auth_token)
+                        content = await GrokResponseProcessor._append_images(content, all_images, auth_token)
                         result = GrokResponseProcessor._build_response(content, model or mr.get("model"))
                         response_closed = True
                         response.close()
@@ -453,6 +474,44 @@ class GrokResponseProcessor:
                             except Exception:
                                 card_data = None
                             if isinstance(card_data, dict):
+                                # 处理 AI 生成图片卡片（grok-420 等非专用图片模型）
+                                # 结构：{"type":"render_generated_image","image_chunk":{"imageUrl":"...","progress":100,...}}
+                                image_chunk = card_data.get("image_chunk")
+                                if isinstance(image_chunk, dict):
+                                    img_url_raw = image_chunk.get("imageUrl", "")
+                                    progress = image_chunk.get("progress", 0)
+                                    # 只渲染已完成的图片（progress >= 100）
+                                    if img_url_raw and progress >= 100:
+                                        logger.info(f"[Processor] cardAttachment 图片: {img_url_raw}, progress={progress}")
+                                        # 规范化 URL（去掉域名前缀，只保留路径）
+                                        img = img_url_raw
+                                        if img.startswith("https://assets.grok.com/"):
+                                            img = img[len("https://assets.grok.com/"):]
+                                        elif img.startswith("https://grok.com/"):
+                                            img = img[len("https://grok.com/"):]
+                                        # 使用与 modelResponse 相同的图片渲染逻辑
+                                        image_mode = setting.global_config.get("image_mode", "url")
+                                        try:
+                                            if image_mode == "base64":
+                                                base64_str = await image_cache_service.download_base64(f"/{img}", auth_token)
+                                                if base64_str:
+                                                    yield make_chunk(f"![Generated Image]({base64_str})\n")
+                                                else:
+                                                    base_url = setting.global_config.get("base_url", "")
+                                                    fallback = f"{base_url}/images/{img.replace('/', '-')}" if base_url else f"https://assets.grok.com/{img}"
+                                                    yield make_chunk(f"![Generated Image]({fallback})\n")
+                                            else:
+                                                await image_cache_service.download_image(f"/{img}", auth_token)
+                                                img_path = img.replace('/', '-')
+                                                base_url = setting.global_config.get("base_url", "")
+                                                img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
+                                                yield make_chunk(f"![Generated Image]({img_url})\n")
+                                        except Exception as e:
+                                            logger.warning(f"[Processor] cardAttachment 图片处理失败: {e}")
+                                            yield make_chunk(f"![Generated Image](https://assets.grok.com/{img})\n")
+                                    continue
+
+                                # 处理传统卡片图片（如 X/Twitter 帖子图片）
                                 image = card_data.get("image") or {}
                                 original = image.get("original")
                                 title = image.get("title") or ""
@@ -556,7 +615,7 @@ class GrokResponseProcessor:
         def walk(value):
             if isinstance(value, dict):
                 for key, item in value.items():
-                    if key in {"generatedImageUrls", "imageUrls", "imageURLs"}:
+                    if key in {"generatedImageUrls", "imageUrls", "imageURLs", "imageUrl"}:
                         if isinstance(item, list):
                             for url in item:
                                 if isinstance(url, str):
