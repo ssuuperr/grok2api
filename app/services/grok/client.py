@@ -452,7 +452,7 @@ class GrokClient:
         top_p: float = 0.95
     ) -> Dict:
         """构建请求载荷（对齐源项目 AppChatReverse.build_payload）"""
-        # 视频模型特殊处理
+        # 视频模型特殊处理（有参考图）
         if is_video and img_uris:
             img_msg = f"https://grok.com/imagine/{post_id}" if post_id else f"https://assets.grok.com/post/{img_uris[0]}"
             return {
@@ -460,7 +460,17 @@ class GrokClient:
                 "modelName": "grok-3",
                 "message": f"{img_msg}  {content} --mode=custom",
                 "fileAttachments": img_ids,
-                "toolOverrides": {"videoGen": True}
+                "toolOverrides": {"videoGen": True},
+            }
+        
+        # 视频模型（纯文字生成视频，无参考图）
+        if is_video:
+            return {
+                "temporary": True,
+                "modelName": "grok-3",
+                "message": content,
+                "fileAttachments": [],
+                "toolOverrides": {"videoGen": True},
             }
         
         # 构建 modelConfigOverride（温度和 topP 参数）

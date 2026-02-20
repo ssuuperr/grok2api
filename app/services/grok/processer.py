@@ -128,10 +128,11 @@ class GrokResponseProcessor:
 
     @staticmethod
     async def process_stream(response, auth_token: str, session: Any = None) -> AsyncGenerator[str, None]:
-        """处理流式响应"""
-        # 状态变量
+        """处理流式响应（对齐源项目 StreamProcessor.process）"""
+        # 状态变量 — 对齐源项目，用 think_opened 统一管理 <think> 标签
         is_image = False
-        is_thinking = False
+        think_opened = False          # 是否已发送 <think>（替代原 is_thinking + thinking_finished）
+        image_think_active = False    # 图片生成进度期间的 thinking 状态
         model = None
         filtered_tags = setting.grok_config.get("filtered_tags", "").split(",")
         video_progress_started = False
@@ -195,6 +196,9 @@ class GrokResponseProcessor:
                     
                     timeout_mgr.mark_received()
 
+                    # 获取当前 thinking 状态
+                    is_thinking = bool(grok_resp.get("isThinking"))
+
                     # 更新模型
                     if user_resp := grok_resp.get("userResponse"):
                         if m := user_resp.get("model"):
@@ -220,185 +224,139 @@ class GrokResponseProcessor:
                         
                         # 视频URL
                         if v_url:
-                            logger.debug("[Processor] 视频生成完成")
+                            logger.info("[Processor] 视频生成完成")
                             video_content = await GrokResponseProcessor._build_video_content(v_url, auth_token)
                             yield make_chunk(video_content)
                         
                         continue
 
-                    # 图片生成进度（streamingImageGenerationResponse）
+                    # 图片生成进度（streamingImageGenerationResponse）— 对齐源项目
                     if img_gen := grok_resp.get("streamingImageGenerationResponse"):
-                        current_thinking = grok_resp.get("isThinking", False)
-                        if show_thinking:
-                            if current_thinking and not is_thinking:
-                                yield make_chunk("<think>\n")
-                                is_thinking = True
-                            if not current_thinking and is_thinking:
-                                yield make_chunk("\n</think>\n")
-                                is_thinking = False
+                        if not show_thinking:
+                            continue
+                        image_think_active = True
+                        if not think_opened:
+                            yield make_chunk("<think>\n")
+                            think_opened = True
                         idx = img_gen.get("imageIndex", 0) + 1
                         progress = img_gen.get("progress", 0)
-                        if show_thinking:
-                            yield make_chunk(f"正在生成第{idx}张图片中，当前进度{progress}%\n")
+                        yield make_chunk(f"正在生成第{idx}张图片中，当前进度{progress}%\n")
                         continue
 
-                    # 图片模式
-                    if grok_resp.get("imageAttachmentInfo"):
-                        is_image = True
+                    # modelResponse 统一处理（对齐源项目：先于 is_image 和对话分支）
+                    if mr := grok_resp.get("modelResponse"):
+                        # 关闭图片生成进度的 think 标签
+                        if image_think_active and think_opened:
+                            yield make_chunk("\n</think>\n")
+                            think_opened = False
+                        image_think_active = False
 
-                    token = grok_resp.get("token", "")
-
-                    # 图片处理（modelResponse 中的图片）
-                    if is_image:
-                        if model_resp := grok_resp.get("modelResponse"):
-                            # 使用递归收集方式获取所有图片 URL
-                            all_images = GrokResponseProcessor._collect_image_urls(model_resp)
-                            if not all_images:
-                                all_images = model_resp.get("generatedImageUrls", [])
-                            
+                        # 收集 modelResponse 中的所有图片 URL
+                        all_images = GrokResponseProcessor._collect_image_urls(mr)
+                        if all_images:
+                            # 有图片 — 渲染图片
                             image_mode = setting.global_config.get("image_mode", "url")
-                            content = ""
-
-                            for img in all_images:
+                            for idx, img in enumerate(all_images, 1):
                                 try:
                                     if image_mode == "base64":
-                                        # Base64模式 - 分块发送
                                         base64_str = await image_cache_service.download_base64(f"/{img}", auth_token)
                                         if base64_str:
-                                            # 分块发送大数据
-                                            if not base64_str.startswith("data:"):
-                                                parts = base64_str.split(",", 1)
-                                                if len(parts) == 2:
-                                                    yield make_chunk(f"![Generated Image](data:{parts[0]},")
-                                                    # 8KB分块
-                                                    for i in range(0, len(parts[1]), 8192):
-                                                        yield make_chunk(parts[1][i:i+8192])
-                                                    yield make_chunk(")\n")
-                                                else:
-                                                    yield make_chunk(f"![Generated Image]({base64_str})\n")
-                                            else:
-                                                yield make_chunk(f"![Generated Image]({base64_str})\n")
+                                            yield make_chunk(f"![image_{idx}]({base64_str})\n")
                                         else:
-                                            yield make_chunk(f"![Generated Image](https://assets.grok.com/{img})\n")
+                                            base_url = setting.global_config.get("base_url", "")
+                                            fallback = f"{base_url}/images/{img.replace('/', '-')}" if base_url else f"https://assets.grok.com/{img}"
+                                            yield make_chunk(f"![image_{idx}]({fallback})\n")
                                     else:
-                                        # URL模式
                                         await image_cache_service.download_image(f"/{img}", auth_token)
                                         img_path = img.replace('/', '-')
                                         base_url = setting.global_config.get("base_url", "")
                                         img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
-                                        content += f"![Generated Image]({img_url})\n"
+                                        yield make_chunk(f"![image_{idx}]({img_url})\n")
                                 except Exception as e:
-                                    logger.warning(f"[Processor] 处理图片失败: {e}")
-                                    content += f"![Generated Image](https://assets.grok.com/{img})\n"
+                                    logger.warning(f"[Processor] 图片处理失败: {e}")
+                                    yield make_chunk(f"![image_{idx}](https://assets.grok.com/{img})\n")
+                        continue
 
-                            yield make_chunk(content.strip(), "stop")
-                            return
-                        elif token:
+                    # cardAttachment 处理（某些模型通过卡片返回图片）
+                    if card := grok_resp.get("cardAttachment"):
+                        json_data = card.get("jsonData")
+                        if isinstance(json_data, str) and json_data.strip():
+                            try:
+                                card_data = orjson.loads(json_data)
+                            except Exception:
+                                card_data = None
+                            if isinstance(card_data, dict):
+                                image = card_data.get("image") or {}
+                                original = image.get("original")
+                                title = image.get("title") or ""
+                                if original:
+                                    title_safe = title.replace("\n", " ").strip() or "image"
+                                    yield make_chunk(f"![{title_safe}]({original})\n")
+                        continue
+
+                    # ---- 以下为 token 文本处理 ----
+                    token = grok_resp.get("token", "")
+
+                    # 图片模式标记（仅传统图生图通道需要）
+                    if grok_resp.get("imageAttachmentInfo"):
+                        is_image = True
+
+                    # is_image 模式下仅输出 token（最终图片由上方 modelResponse 处理输出）
+                    if is_image:
+                        if token:
                             yield make_chunk(token)
+                        continue
 
-                    # 对话处理
-                    else:
-                        # 对话模式下检测 modelResponse 中的图片（thinking 模型生成图片时可能不发送 imageAttachmentInfo）
-                        if model_resp := grok_resp.get("modelResponse"):
-                            all_images = GrokResponseProcessor._collect_image_urls(model_resp)
-                            if all_images:
-                                # 关闭 think 标签（如果还在 thinking 状态）
-                                if is_thinking and show_thinking:
-                                    yield make_chunk("\n</think>\n")
-                                    is_thinking = False
-                                
-                                image_mode = setting.global_config.get("image_mode", "url")
-                                for idx, img in enumerate(all_images, 1):
-                                    try:
-                                        if image_mode == "base64":
-                                            base64_str = await image_cache_service.download_base64(f"/{img}", auth_token)
-                                            if base64_str:
-                                                yield make_chunk(f"![image_{idx}]({base64_str})\n")
-                                            else:
-                                                base_url = setting.global_config.get("base_url", "")
-                                                fallback = f"{base_url}/images/{img.replace('/', '-')}" if base_url else f"https://assets.grok.com/{img}"
-                                                yield make_chunk(f"![image_{idx}]({fallback})\n")
-                                        else:
-                                            await image_cache_service.download_image(f"/{img}", auth_token)
-                                            img_path = img.replace('/', '-')
-                                            base_url = setting.global_config.get("base_url", "")
-                                            img_url = f"{base_url}/images/{img_path}" if base_url else f"/images/{img_path}"
-                                            yield make_chunk(f"![image_{idx}]({img_url})\n")
-                                    except Exception as e:
-                                        logger.warning(f"[Processor] 对话图片处理失败: {e}")
-                                        yield make_chunk(f"![image_{idx}](https://assets.grok.com/{img})\n")
-                                continue
+                    # ---- 对话模式 token 处理 ----
+                    if not token:
+                        continue
 
-                        # cardAttachment 处理（某些模型通过卡片返回图片）
-                        if card := grok_resp.get("cardAttachment"):
-                            json_data = card.get("jsonData")
-                            if isinstance(json_data, str) and json_data.strip():
-                                try:
-                                    import orjson as card_json
-                                    card_data = card_json.loads(json_data)
-                                except Exception:
-                                    card_data = None
-                                if isinstance(card_data, dict):
-                                    image = card_data.get("image") or {}
-                                    original = image.get("original")
-                                    title = image.get("title") or ""
-                                    if original:
-                                        title_safe = title.replace("\n", " ").strip() or "image"
-                                        yield make_chunk(f"![{title_safe}]({original})\n")
-                            continue
+                    if isinstance(token, list):
+                        continue
 
-                        if isinstance(token, list):
-                            continue
+                    if any(tag in token for tag in filtered_tags if token):
+                        continue
 
-                        if any(tag in token for tag in filtered_tags if token):
-                            continue
+                    message_tag = grok_resp.get("messageTag")
 
-                        current_is_thinking = grok_resp.get("isThinking", False)
-                        message_tag = grok_resp.get("messageTag")
-
-                        # 搜索结果处理
-                        if grok_resp.get("toolUsageCardId"):
-                            if web_search := grok_resp.get("webSearchResults"):
-                                if current_is_thinking:
-                                    if show_thinking:
-                                        for result in web_search.get("results", []):
-                                            title = result.get("title", "")
-                                            url = result.get("url", "")
-                                            preview = result.get("preview", "")
-                                            preview_clean = preview.replace("\n", "") if isinstance(preview, str) else ""
-                                            token += f'\n- [{title}]({url} "{preview_clean}")'
-                                        token += "\n"
-                                    else:
-                                        continue
+                    # 搜索结果处理
+                    if grok_resp.get("toolUsageCardId"):
+                        if web_search := grok_resp.get("webSearchResults"):
+                            if is_thinking:
+                                if show_thinking:
+                                    for result in web_search.get("results", []):
+                                        title = result.get("title", "")
+                                        url = result.get("url", "")
+                                        preview = result.get("preview", "")
+                                        preview_clean = preview.replace("\n", "") if isinstance(preview, str) else ""
+                                        token += f'\n- [{title}]({url} "{preview_clean}")'
+                                    token += "\n"
                                 else:
                                     continue
                             else:
                                 continue
+                        else:
+                            continue
 
-                        if token:
-                            content = token
+                    content = token
 
-                            if message_tag == "header":
-                                content = f"\n\n{token}\n\n"
+                    if message_tag == "header":
+                        content = f"\n\n{token}\n\n"
 
-                            # Thinking状态切换
-                            should_skip = False
-                            if not is_thinking and current_is_thinking:
-                                if show_thinking:
-                                    content = f"<think>\n{content}"
-                                else:
-                                    should_skip = True
-                            elif is_thinking and not current_is_thinking:
-                                if show_thinking:
-                                    content = f"\n</think>\n{content}"
-                            elif current_is_thinking:
-                                if not show_thinking:
-                                    should_skip = True
+                    # Thinking 状态切换 — 对齐源项目 think_opened 模式
+                    in_think = is_thinking or image_think_active
+                    if in_think:
+                        if not show_thinking:
+                            continue
+                        if not think_opened:
+                            content = f"<think>\n{content}"
+                            think_opened = True
+                    else:
+                        if think_opened:
+                            content = f"\n</think>\n{content}"
+                            think_opened = False
 
-                            if not should_skip:
-                                yield make_chunk(content)
-                            
-                            is_thinking = current_is_thinking
+                    yield make_chunk(content)
 
                 except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
                     logger.warning(f"[Processor] 解析失败: {e}")
@@ -407,6 +365,9 @@ class GrokResponseProcessor:
                     logger.warning(f"[Processor] 处理出错: {e}")
                     continue
 
+            # 流结束时，如果 think 标签未关闭，补发关闭
+            if think_opened:
+                yield make_chunk("</think>\n")
             yield make_chunk("", "stop")
             yield "data: [DONE]\n\n"
             logger.info(f"[Processor] 流式完成，耗时: {timeout_mgr.duration():.2f}秒")
